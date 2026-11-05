@@ -61,9 +61,10 @@ exist. Each entry carries a `delegated_sessions` counter.
   working right now?" without the Desktop app. Same privacy boundary as the backend.
 - **Multiple offices** — Settings ▸ Plugins ▸ Office 3D ▸ **Offices**: one office name per
   line (default: MokLabs-TI, Comercial, Operaciones, Personas, Finanzas, Riesgos, Travel).
-  Each office becomes its own room. Assign profiles in **Profile offices** (same page) or with
-  the **Office** picker in a desk's detail panel; unassigned profiles share an *Unassigned*
-  room. Clear the list (or press *Single room*) for the classic single WORK room.
+  Each office becomes its own room. New profiles wait in the **lounge**: **drag a person onto
+  an office** to assign it (drop it on the lounge to unassign), or use **Profile offices**
+  (same page) or the **Office** picker in a desk's detail panel. Clear the list (or press
+  *Single room*) for the classic single WORK room.
 - **Settings ▸ Plugins ▸ Office 3D** — refresh interval (2s / 5s / 15s / 60s), hide offline
   profiles, and opt-in desktop notifications when a profile changes state.
 

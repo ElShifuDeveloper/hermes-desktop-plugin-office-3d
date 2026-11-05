@@ -27,6 +27,12 @@ Checks: ad-hoc node harness over the pure layout functions + headless render.
 - [x] T2 Config UI: offices list + per-profile assignment in Settings, office
       picker in the desk detail panel, prefs normalisation.
 - [x] T3 Docs + version bump (README section, CHANGELOG 1.5.0, plugin.yaml).
+- [x] T4 Unassigned profiles wait in the lounge (no Unassigned room), waiting
+      rows clear of furniture; tea ring spills to an outer ring past 8.
+      (User request 2026-11-05: "default in the lounge, then drag".)
+- [x] T5 Drag a person (desk or lounge) onto an office to assign, onto the lounge
+      to unassign; drop highlight + ghost chip; click/pan preserved.
+- [x] T6 Docs + 1.6.0.
 
 ## Acceptance criteria
 
@@ -51,6 +57,16 @@ Checks: ad-hoc node harness over the pure layout functions + headless render.
 - Upstream `tests/layout-browser.mjs` not run: Playwright browsers not installed.
 - Layout tuning: rooms at least 2 desks wide, row aisle 2.6 so plates stay legible.
 
+- 1.5.0 installed in all 8 profiles (plugins are per profile; the 404 seen in
+  Desktop was the active profile lacking the plugin). User confirmed it works.
+- T4+T5: `node tests/multi-office-layout.mjs` → ALL OK (no Unassigned room,
+  waiting seats inside lounge and apart, lounge sitters grabbable, screen↔world
+  round trip, drop targets). Browser fixture: 10 synthetic pointer drags with no
+  pause and the pane hidden produced exactly the expected assignments; click
+  without movement selects; click after a drag is swallowed.
+- Found while testing: hit testing on the last painted frame grabbed the wrong
+  person when frames lag; fixed with `computeFrame` on pointer events.
+
 ## Next step
 
-Install the fork in Hermes Desktop and check the Settings page live.
+Reinstall 1.6.0 in all profiles; user to try dragging in Desktop.

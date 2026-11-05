@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-11-05
+
+### Added
+- **Drag to assign.** With offices configured, drag a person — from its desk or from the
+  lounge — onto an office room to assign it there; drop it on the lounge to unassign. The room
+  under the cursor is highlighted and a chip shows where it will land (`devops → Comercial`).
+  A press without movement is still a click (inspect), and dragging empty floor still pans.
+
+### Changed
+- **Unassigned profiles wait in the lounge** instead of an "Unassigned" room. They have no
+  desk yet and line up along the front of the lounge (then the back row), spread out so each
+  one is easy to grab; idle assigned profiles keep the tea ring around the table. A crowded
+  tea ring (more than 8) spills onto a wider outer ring.
+- Pickers label the empty choice "Lounge (unassigned)"; "Lounge" is a reserved office name.
+- Pointer hit testing recomputes the frame for the current props instead of trusting the
+  last painted frame, so a drag right after another drop (or with the window hidden) never
+  grabs the wrong person.
+
 ## [1.5.0] - 2026-11-05
 
 ### Added
