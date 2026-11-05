@@ -2,7 +2,9 @@
 // copies this file into ~/.hermes/desktop-plugins/office-3d/plugin.js at install.
 //
 // Office 3D — fake-isometric office view of the Hermes profile gateways.
-// Each profile owns a desk in the WORK zone; when busy (a session is active)
+// Each profile owns a desk in a WORK room — one room per configured office
+// (Settings ▸ Office 3D), or a single WORK room when no offices are set. When
+// busy (a session is active)
 // the avatar sits at the desk and its hands "type". Online-but-idle avatars
 // relax in the LOUNGE zone with tea. Offline profiles are NOT drawn at all:
 // their desk sits empty with a dark monitor and a dimmed name label.
@@ -666,34 +668,171 @@ function deskGrid(count) {
   return { cols, rows: Math.ceil(n / cols) }
 }
 
+// ---------------------------------------------------------------------------
+// Offices.
+//
+// The user may define named offices (Settings ▸ Office 3D) and assign each
+// profile to one. Every office becomes its own work room; profiles with no (or
+// a stale) assignment share an "Unassigned" room, which is only drawn when it
+// has someone in it. With NO offices configured the scene is the classic single
+// WORK room, byte-identical to before.
+// ---------------------------------------------------------------------------
+// Aisles between office rooms. The row aisle is deeper because, in the
+// isometric view, desks of the room behind project up over the front of the
+// room in front of it, where its name plate sits.
+const OFFICE_GAP_X = 1.4
+const OFFICE_GAP_Y = 2.6
+const OFFICE_MIN_DESKS = 2      // every room is at least two desks wide, even empty
+const MAX_OFFICES = 24
+const MAX_OFFICE_NAME = 40
+const UNASSIGNED_OFFICE = 'Unassigned'
+
+// Unique, trimmed, non-empty names, in order. Accepts an array or a
+// newline/comma separated string (a hand-edited stored value).
+function normalizeOffices(value) {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? value.split(/[\n,]/)
+      : []
+  const out = []
+  const seen = new Set()
+  for (const item of raw) {
+    if (typeof item !== 'string') continue
+    const name = item.trim().slice(0, MAX_OFFICE_NAME)
+    const key = name.toLowerCase()
+    if (!name || seen.has(key) || key === UNASSIGNED_OFFICE.toLowerCase()) continue
+    seen.add(key)
+    out.push(name)
+    if (out.length >= MAX_OFFICES) break
+  }
+  return out
+}
+
+// Group entry INDEXES by office. Returns null when no offices are configured,
+// which selects the legacy single-room layout.
+function officeGroups(entries, offices, assignments) {
+  const names = normalizeOffices(offices)
+  if (!names.length) return null
+  const list = Array.isArray(entries) ? entries : []
+  const map = assignments && typeof assignments === 'object' ? assignments : {}
+  const byName = new Map(names.map((n) => [n, []]))
+  const unassigned = []
+  list.forEach((entry, i) => {
+    const want = entry && typeof map[entry.profile] === 'string' ? map[entry.profile] : null
+    if (want && byName.has(want)) byName.get(want).push(i)
+    else unassigned.push(i)
+  })
+  const groups = names.map((name) => ({ name, members: byName.get(name) }))
+  if (unassigned.length) {
+    groups.push({ name: UNASSIGNED_OFFICE, members: unassigned, unassigned: true })
+  }
+  return groups
+}
+
 // World-space extents of the whole scene for `count` desks, plus the isometric
-// bounding box used to fit it into the canvas.
-function sceneLayout(count) {
+// bounding box used to fit it into the canvas. `groups` (from officeGroups)
+// switches to one room per office; omitted/null keeps the single WORK room.
+// Either way the result carries `zones` (one floor per room) and `slots` (the
+// desk position of every entry index), which is what drawing and hit testing use.
+function sceneLayout(count, groups) {
+  if (Array.isArray(groups) && groups.length) return multiOfficeLayout(count, groups)
   const { cols, rows } = deskGrid(count)
   const workW = (cols - 1) * DESK_COL_SPACING + WORK_PAD
   const workH = (rows - 1) * DESK_ROW_SPACING + WORK_PAD
   const worldW = Math.max(LOUNGE_W, workW)
-  const loungeY0 = workH + LOUNGE_GAP
-  const worldH = loungeY0 + LOUNGE_DEPTH
-  // Ground plane projects to (w + h) * ISO_X wide and (w + h) * ISO_Y tall;
-  // add the z extent above it (monitors + name labels sit at z ≈ 2.1-3.0).
-  return {
+  const n = Math.max(0, Math.floor(count) || 0)
+  const slots = []
+  for (let i = 0; i < n; i++) slots.push(deskSlot(i, cols))
+  return finishLayout({
     cols,
     rows,
     workW,
     workH,
     worldW,
+    zones: [{ name: 'WORK', x0: 0, y0: 0, w: worldW, h: workH, legacy: true }],
+    slots,
+  })
+}
+
+// Pack office rooms into rows (≈ square overall), each room sized for its own
+// desk grid; rooms in one row share the row's depth so the floor reads tidy.
+function multiOfficeLayout(count, groups) {
+  const blocks = groups.map((g) => {
+    const members = Array.isArray(g.members) ? g.members : []
+    const { cols, rows } = deskGrid(Math.max(OFFICE_MIN_DESKS, members.length))
+    return {
+      name: g.name,
+      unassigned: !!g.unassigned,
+      members,
+      cols,
+      rows,
+      w: (cols - 1) * DESK_COL_SPACING + WORK_PAD,
+      h: (rows - 1) * DESK_ROW_SPACING + WORK_PAD,
+    }
+  })
+  const perRow = Math.max(1, Math.ceil(Math.sqrt(blocks.length)))
+  const zones = []
+  const slots = new Array(Math.max(0, Math.floor(count) || 0))
+  let y = 0
+  let maxRowW = 0
+  for (let r = 0; r < blocks.length; r += perRow) {
+    const row = blocks.slice(r, r + perRow)
+    const rowH = Math.max(...row.map((b) => b.h))
+    let x = 0
+    for (const b of row) {
+      zones.push({ name: b.name, x0: x, y0: y, w: b.w, h: rowH, count: b.members.length, unassigned: b.unassigned })
+      b.members.forEach((entryIndex, k) => {
+        slots[entryIndex] = {
+          x: x + WORK_ORIGIN.x + (k % b.cols) * DESK_COL_SPACING,
+          y: y + WORK_ORIGIN.y + Math.floor(k / b.cols) * DESK_ROW_SPACING,
+        }
+      })
+      x += b.w + OFFICE_GAP_X
+    }
+    maxRowW = Math.max(maxRowW, x - OFFICE_GAP_X)
+    y += rowH + OFFICE_GAP_Y
+  }
+  const workH = Math.max(0, y - OFFICE_GAP_Y)
+  // Any index a group did not cover (should not happen) still gets a desk spot.
+  for (let i = 0; i < slots.length; i++) if (!slots[i]) slots[i] = deskSlot(i, MAX_COLS)
+  return finishLayout({
+    cols: MAX_COLS,
+    rows: 0,
+    workW: maxRowW,
+    workH,
+    worldW: Math.max(LOUNGE_W, maxRowW),
+    zones,
+    slots,
+    multi: true,
+  })
+}
+
+function finishLayout(L) {
+  const loungeY0 = L.workH + LOUNGE_GAP
+  const worldH = loungeY0 + LOUNGE_DEPTH
+  // Ground plane projects to (w + h) * ISO_X wide and (w + h) * ISO_Y tall;
+  // add the z extent above it (monitors + name labels sit at z ≈ 2.1-3.0).
+  return {
+    ...L,
     worldH,
     loungeY0,
-    projW: (worldW + worldH) * ISO_X,
-    projH: (worldW + worldH) * ISO_Y + 3.0,
+    projW: (L.worldW + worldH) * ISO_X,
+    projH: (L.worldW + worldH) * ISO_Y + 3.0,
     // Lounge furniture is anchored so the GROUP is centred in the lounge zone
     // (see LOUNGE_GROUP_C*), instead of hanging off the work floor's left edge.
     lounge: {
-      x: worldW / 2 - LOUNGE_GROUP_CX,
+      x: L.worldW / 2 - LOUNGE_GROUP_CX,
       y: loungeY0 + LOUNGE_DEPTH / 2 - LOUNGE_GROUP_CY,
     },
   }
+}
+
+// Desk position of entry `index` in a computed layout.
+function layoutSlot(L, index) {
+  return L && Array.isArray(L.slots) && L.slots[index]
+    ? L.slots[index]
+    : deskSlot(index, L ? L.cols : MAX_COLS)
 }
 
 function deskSlot(index, cols) {
@@ -755,7 +894,7 @@ function hitTestDesks(entries, frame, px, py) {
   let bestIndex = -1
   let bestDepth = -Infinity
   for (let i = 0; i < entries.length; i++) {
-    const slot = deskSlot(i, layout.cols)
+    const slot = layoutSlot(layout, i)
     const box = deskHitBox(slot, ox, oy, scale)
     if (px < box.x0 || px > box.x1 || py < box.y0 || py > box.y1) continue
     const depth = slot.x + slot.y
@@ -905,7 +1044,35 @@ function drawSelection(c, ox, oy, scale, slot, accent) {
 // ---------------------------------------------------------------------------
 // Frame draw.
 // ---------------------------------------------------------------------------
-function drawFrame(canvas, c, entries, tSec, selectedIndex, view) {
+// Office name plate on the front edge of its room, as a pill so it stays legible
+// over desks and floor in both themes.
+function drawOfficeLabel(c, ox, oy, scale, zone, P) {
+  const text = zone.name + ' · ' + (zone.count | 0)
+  const [lx, ly] = iso(zone.x0 + zone.w / 2, zone.y0 + zone.h - 0.45, 0, scale)
+  const x = ox + lx
+  const y = oy + ly
+  c.save()
+  c.font = '600 11px system-ui, -apple-system, "Segoe UI", sans-serif'
+  c.textAlign = 'center'
+  c.textBaseline = 'middle'
+  const w = c.measureText(text).width + 14
+  const h = 18
+  c.beginPath()
+  if (typeof c.roundRect === 'function') c.roundRect(x - w / 2, y - h / 2, w, h, 9)
+  else c.rect(x - w / 2, y - h / 2, w, h)
+  c.fillStyle = P.pillColor
+  c.fill()
+  if (P.pillBorder) {
+    c.strokeStyle = P.pillBorder
+    c.lineWidth = 1
+    c.stroke()
+  }
+  c.fillStyle = zone.unassigned ? P.textTer : P.textSec
+  c.fillText(text, x, y + 0.5)
+  c.restore()
+}
+
+function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
   if (!Array.isArray(entries)) entries = []
   const P = buildPalette(canvas)
   const bg = P.bg
@@ -930,7 +1097,7 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view) {
   // Size the scene for THIS many desks, then fit it (and apply the user's zoom +
   // pan) into the canvas. frameTransform is pure so the wheel handler computes
   // the identical transform.
-  const L = sceneLayout(Array.isArray(entries) ? entries.length : 0)
+  const L = sceneLayout(Array.isArray(entries) ? entries.length : 0, groups)
   const T = frameTransform(
     cssW,
     cssH,
@@ -943,21 +1110,24 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view) {
   const oy = T.oy
   const scale = T.scale
 
-  // Zone floors
-  drawFloor(c, ox, oy, 0, 0, L.worldW, L.workH, scale, {
-    fill: P.floorWorkFill,
-    stroke,
-  })
+  // Zone floors — one per office room (a single WORK room without offices).
+  for (const z of L.zones) {
+    drawFloor(c, ox, oy, z.x0, z.y0, z.w, z.h, scale, {
+      fill: z.unassigned ? P.floorLoungeFill : P.floorWorkFill,
+      stroke,
+    })
+  }
   drawFloor(c, ox, oy, 0, L.loungeY0, L.worldW, LOUNGE_DEPTH, scale, {
     fill: P.floorLoungeFill,
     stroke,
   })
 
-  // Zone labels — bottom-right corner of each zone.
+  // Zone labels — bottom-right corner of each zone. Office rooms get name
+  // plates instead, drawn last (see below) so desks never hide them.
   c.font = '10px system-ui, -apple-system, "Segoe UI", sans-serif'
   c.fillStyle = textTer
   c.textAlign = 'right'
-  {
+  if (!L.multi) {
     const [lx, ly] = iso(L.worldW, L.workH, 0, scale)
     c.fillText('WORK', ox + lx + 24, oy + ly - 22)
   }
@@ -973,14 +1143,14 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view) {
     selectedIndex >= 0 &&
     selectedIndex < entries.length
   ) {
-    drawSelection(c, ox, oy, scale, deskSlot(selectedIndex, L.cols), accent)
+    drawSelection(c, ox, oy, scale, layoutSlot(L, selectedIndex), accent)
   }
 
   // Lounge furniture (drawn behind lounge avatars because sofa is at higher y).
   drawLounge(c, ox, oy, scale, stroke, textQuat, accent, tSec, P, L.lounge)
 
   // Desks & at-desk avatars — painter's order, back to front.
-  const desks = entries.map((entry, i) => ({ entry, i, slot: deskSlot(i, L.cols) }))
+  const desks = entries.map((entry, i) => ({ entry, i, slot: layoutSlot(L, i) }))
   desks.sort((a, b) => (a.slot.x + a.slot.y) - (b.slot.x + b.slot.y))
   for (const { entry, i, slot } of desks) {
     drawDeskAndAvatar(c, ox, oy, scale, slot, entry, i, tSec,
@@ -998,6 +1168,11 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view) {
     drawLoungeAvatar(c, ox, oy, scale, slot, entry, i, tSec, idx,
       { stroke, textSec, textTer, accent, P })
   })
+
+  // Office name plates, on top of everything in their room.
+  if (L.multi) {
+    for (const z of L.zones) drawOfficeLabel(c, ox, oy, scale, z, P)
+  }
 
   // -------------------------------------------------------------------------
   // (Aggregate stats now render as DOM chips below the canvas — see
@@ -1760,12 +1935,13 @@ function drawLoungeAvatar(c, ox, oy, scale, slot, entry, index, tSec, idx, palet
 // ---------------------------------------------------------------------------
 // React components.
 // ---------------------------------------------------------------------------
-function OfficeCanvas({ entries, selectedIndex, onPick }) {
+function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const rafRef = useRef(0)
   const startRef = useRef(0)
   const entriesRef = useRef(entries)
+  const groupsRef = useRef(groups || null)
   // Transform of the last drawn frame, so a click can be hit-tested against the
   // exact projection the pixels came from.
   const frameRef = useRef(null)
@@ -1787,6 +1963,10 @@ function OfficeCanvas({ entries, selectedIndex, onPick }) {
   useEffect(() => {
     entriesRef.current = entries
   }, [entries])
+
+  useEffect(() => {
+    groupsRef.current = groups || null
+  }, [groups])
 
   useEffect(() => {
     selectedRef.current = selectedIndex
@@ -1827,7 +2007,7 @@ function OfficeCanvas({ entries, selectedIndex, onPick }) {
         try {
           frameRef.current = drawFrame(
             canvas, c2, entriesRef.current || [], tSec, selectedRef.current,
-            viewRef.current,
+            viewRef.current, groupsRef.current,
           )
         } catch (err) {
           // Never let a draw error kill the loop.
@@ -1864,7 +2044,7 @@ function OfficeCanvas({ entries, selectedIndex, onPick }) {
     return {
       cssW: Math.max(200, rect ? Math.floor(rect.width) : 640),
       cssH: Math.max(200, rect ? Math.floor(rect.height) : 400),
-      L: sceneLayout(count),
+      L: sceneLayout(count, groupsRef.current),
     }
   }
 
@@ -2035,10 +2215,23 @@ function OfficeCanvas({ entries, selectedIndex, onPick }) {
 // Preferences (desktop-half-local, persisted with ctx.storage).
 // ---------------------------------------------------------------------------
 const PREFS_KEY = 'prefs'
+// Default office preset. An empty list means "one classic WORK room".
+const DEFAULT_OFFICES = [
+  'MokLabs-TI',
+  'Comercial',
+  'Operaciones',
+  'Personas',
+  'Finanzas',
+  'Riesgos',
+  'Travel',
+]
 const PREFS_DEFAULTS = {
   pollSeconds: 5,
   hideOffline: false,
   notifyOnChange: false,
+  offices: DEFAULT_OFFICES,
+  // profile name -> office name
+  assignments: {},
 }
 const POLL_CHOICES = ['2', '5', '15', '60']
 
@@ -2058,7 +2251,144 @@ function readPrefs(ctx) {
       : PREFS_DEFAULTS.pollSeconds
   merged.hideOffline = !!merged.hideOffline
   merged.notifyOnChange = !!merged.notifyOnChange
+  merged.offices = normalizeOffices(merged.offices)
+  merged.assignments = normalizeAssignments(merged.assignments)
   return merged
+}
+
+function normalizeAssignments(value) {
+  const out = {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return out
+  for (const [profile, office] of Object.entries(value)) {
+    if (typeof office === 'string' && office.trim()) out[profile] = office.trim()
+  }
+  return out
+}
+
+// Patch for prefs.update(): assign `profile` to `office` ('' = unassign).
+// Assignments to an office that was later removed are kept (the profile just
+// shows as Unassigned), so re-adding the office restores them.
+function assignmentPatch(assignments, profile, office) {
+  const next = { ...(assignments || {}) }
+  if (office) next[profile] = office
+  else delete next[profile]
+  return { assignments: next }
+}
+
+// Native <select> for picking a profile's office; styled like the app inputs.
+function OfficePicker({ profile, offices, assignments, update, className }) {
+  const current = assignments[profile]
+  const value = current && offices.includes(current) ? current : ''
+  return jsx('select', {
+    value,
+    'aria-label': 'Office for ' + profile,
+    'data-office-picker': profile,
+    onChange: (event) => update(assignmentPatch(assignments, profile, event.target.value)),
+    className: cn(
+      'h-7 max-w-[12rem] rounded-md border border-[var(--ui-stroke-secondary)] bg-[var(--ui-bg)]',
+      'px-1.5 text-xs text-[var(--ui-text-secondary)]',
+      className,
+    ),
+    children: [
+      jsx('option', { value: '', children: '— ' + UNASSIGNED_OFFICE + ' —' }, ''),
+      ...offices.map((name) => jsx('option', { value: name, children: name }, name)),
+    ],
+  })
+}
+
+// Offices editor: one name per line. Saved on blur / Save, so typing a name
+// does not re-layout the office on every keystroke.
+function OfficesEditor({ offices, update }) {
+  const joined = offices.join('\n')
+  const [draft, setDraft] = useState(joined)
+  useEffect(() => setDraft(joined), [joined])
+  const save = () => update({ offices: normalizeOffices(draft) })
+  const btn =
+    'px-2.5 py-1 rounded-md text-xs font-medium border border-[var(--ui-stroke-secondary)] ' +
+    'text-[var(--ui-text-secondary)] hover:text-[var(--ui-text)]'
+  return jsxs('div', {
+    className: 'flex flex-col gap-2 py-3',
+    children: [
+      jsx('div', { className: 'text-sm font-medium text-[var(--ui-text-secondary)]', children: 'Offices' }),
+      jsx('p', {
+        className: 'text-xs text-[var(--ui-text-tertiary)]',
+        children:
+          'One office per line. Each office is drawn as its own room; assign profiles below or from a desk\u2019s detail panel. Leave empty for the classic single WORK room.',
+      }),
+      jsx('textarea', {
+        value: draft,
+        rows: Math.max(4, Math.min(12, draft.split('\n').length + 1)),
+        'data-offices-editor': true,
+        onChange: (event) => setDraft(event.target.value),
+        onBlur: save,
+        className:
+          'w-full max-w-md rounded-md border border-[var(--ui-stroke-secondary)] bg-[var(--ui-bg)] ' +
+          'px-2 py-1.5 text-xs font-mono text-[var(--ui-text-secondary)]',
+      }),
+      jsxs('div', {
+        className: 'flex flex-wrap gap-2',
+        children: [
+          jsx('button', { type: 'button', className: btn, onClick: save, children: 'Save offices' }),
+          jsx('button', {
+            type: 'button',
+            className: btn,
+            onClick: () => update({ offices: DEFAULT_OFFICES }),
+            children: 'Restore default offices',
+          }),
+          jsx('button', {
+            type: 'button',
+            className: btn,
+            onClick: () => update({ offices: [] }),
+            children: 'Single room (no offices)',
+          }),
+        ],
+      }),
+    ],
+  })
+}
+
+// Profile -> office table for the settings page. Uses the same shared query as
+// the page and the chip, so it never adds a poll of its own.
+function OfficeAssignments({ ctx, offices, assignments, update }) {
+  const query = useQuery({
+    queryKey: OFFICE_QUERY_KEY,
+    queryFn: () => ctx.rest('/state'),
+  })
+  const profiles = (Array.isArray(query.data) ? query.data : [])
+    .map((e) => e && e.profile)
+    .filter((p) => typeof p === 'string')
+  if (!offices.length) return null
+  return jsxs('div', {
+    className: 'flex flex-col gap-2 py-3',
+    children: [
+      jsx('div', { className: 'text-sm font-medium text-[var(--ui-text-secondary)]', children: 'Profile offices' }),
+      profiles.length
+        ? jsx('div', {
+            className: 'flex flex-col gap-1 max-w-md',
+            children: profiles.map((profile) =>
+              jsxs('div', {
+                className: 'flex items-center justify-between gap-3',
+                children: [
+                  jsxs('span', {
+                    className: 'flex min-w-0 items-center gap-2 text-xs text-[var(--ui-text-secondary)]',
+                    children: [
+                      jsx('span', {
+                        className: 'inline-block h-2 w-2 rounded-full shrink-0',
+                        style: { backgroundColor: profileColor(profile) || '#888' },
+                      }),
+                      jsx('span', { className: 'truncate', children: profile }),
+                    ],
+                  }),
+                  jsx(OfficePicker, { profile, offices, assignments, update }),
+                ],
+              }, profile)),
+          })
+        : jsx('p', {
+            className: 'text-xs text-[var(--ui-text-tertiary)]',
+            children: query.isLoading ? 'Loading profiles…' : 'No profiles reported by the backend yet.',
+          }),
+    ],
+  })
 }
 
 // Aggregate the per-profile entries into the numbers the chips show.
@@ -2079,8 +2409,8 @@ function summarize(entries) {
 
 // Settings ▸ Plugins ▸ Office 3D. Built from the app's own settings rows so it
 // looks like core Settings.
-function OfficeSettingsPage({ prefs, update }) {
-  const { pollSeconds, hideOffline, notifyOnChange } = useValue(prefs)
+function OfficeSettingsPage({ ctx, prefs, update }) {
+  const { pollSeconds, hideOffline, notifyOnChange, offices, assignments } = useValue(prefs)
   return jsxs('div', {
     className: 'flex flex-col',
     children: [
@@ -2108,6 +2438,8 @@ function OfficeSettingsPage({ prefs, update }) {
           'A desktop toast when a profile goes busy, idle or offline. The status-bar chip is the poller, so keep it enabled for this to fire.',
         onChange: (on) => update({ notifyOnChange: on }),
       }),
+      jsx(OfficesEditor, { offices, update }),
+      jsx(OfficeAssignments, { ctx, offices, assignments, update }),
     ],
   })
 }
@@ -2286,7 +2618,7 @@ function OfficeMetric({ label, value, tone }) {
   })
 }
 
-function OfficeDetailPanel({ entry, onClose }) {
+function OfficeDetailPanel({ entry, onClose, offices, assignments, update }) {
   const pcolor = profileColor(entry.profile) || '#888'
   const state = entry.busy ? 'busy' : entry.online ? 'idle' : 'offline'
   const [sessionId, setSessionId] = useState(null)
@@ -2351,6 +2683,15 @@ function OfficeDetailPanel({ entry, onClose }) {
           }),
         ],
       }),
+      Array.isArray(offices) && offices.length && update
+        ? jsxs('div', {
+            className: 'flex items-center justify-between gap-3',
+            children: [
+              jsx('span', { className: 'text-xs text-[var(--ui-text-tertiary)]', children: 'Office' }),
+              jsx(OfficePicker, { profile: entry.profile, offices, assignments: assignments || {}, update }),
+            ],
+          })
+        : null,
       jsx(OfficeMetric, { label: 'Sessions active in last 90s', value: String(entry.active_sessions | 0) }),
       jsx(OfficeMetric, { label: 'Unended recorded sessions', value: String(entry.open_sessions | 0) }),
       jsx(OfficeMetric, { label: 'Gateway-reported agents', value: String(entry.active_agents | 0) }),
@@ -2461,8 +2802,8 @@ function leaderValue(entry, metric) {
     : Number(entry.tokens_total) || 0
 }
 
-function OfficePage({ ctx, prefs }) {
-  const { pollSeconds, hideOffline } = useValue(prefs)
+function OfficePage({ ctx, prefs, update }) {
+  const { pollSeconds, hideOffline, offices, assignments } = useValue(prefs)
   const [selectedProfile, setSelectedProfile] = useState(null)
   // Pause polling while the document is hidden (other tab / minimized).
   // Canvas rAF already stops on visibilitychange; the query must too,
@@ -2495,6 +2836,7 @@ function OfficePage({ ctx, prefs }) {
     })
   } else {
     const { all, visible: entries, selected: selectedEntry, selectedIndex } = officeView(query.data, hideOffline, selectedProfile)
+    const groups = officeGroups(entries, offices, assignments)
     const empty = all.length === 0
       ? jsx(EmptyState, { title: 'No profiles found', description: 'The backend returned no profiles.' })
       : entries.length === 0
@@ -2515,7 +2857,7 @@ function OfficePage({ ctx, prefs }) {
             jsx('div', {
               className: 'min-w-0',
               style: empty ? undefined : { height: 'clamp(380px, 62vh, 760px)' },
-              children: empty || jsx(OfficeCanvas, { entries, selectedIndex, onPick: pick }),
+              children: empty || jsx(OfficeCanvas, { entries, selectedIndex, onPick: pick, groups }),
             }),
             jsxs('aside', {
               'aria-label': 'Profile usage and details',
@@ -2525,7 +2867,7 @@ function OfficePage({ ctx, prefs }) {
                   ? jsx('p', { className: 'text-xs text-[var(--ui-text-tertiary)]', children: selectedEntry.profile + ' is hidden from the scene/list. Details remain selected.' })
                   : null,
                 selectedEntry
-                  ? jsx(OfficeDetailPanel, { key: selectedEntry.profile, entry: selectedEntry, onClose: () => setSelectedProfile(null) })
+                  ? jsx(OfficeDetailPanel, { key: selectedEntry.profile, entry: selectedEntry, onClose: () => setSelectedProfile(null), offices, assignments, update })
                   : selectedProfile
                     ? jsx('p', { className: 'text-xs text-[var(--ui-text-tertiary)]', children: 'The selected profile is no longer in the backend response.' })
                     : null,
@@ -2589,7 +2931,7 @@ export default {
       id: 'page',
       area: ROUTES_AREA,
       data: { path: OFFICE_PATH },
-      render: () => jsx(OfficePage, { ctx, prefs }),
+      render: () => jsx(OfficePage, { ctx, prefs, update }),
     })
     c.register({
       id: 'nav',
@@ -2634,7 +2976,7 @@ export default {
       title: 'Office 3D',
       icon: 'organization',
       order: 0,
-      render: () => jsx(OfficeSettingsPage, { prefs, update }),
+      render: () => jsx(OfficeSettingsPage, { ctx, prefs, update }),
     })
   },
 }
