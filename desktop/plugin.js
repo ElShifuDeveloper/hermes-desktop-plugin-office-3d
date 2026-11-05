@@ -672,10 +672,11 @@ function deskGrid(count) {
 // Offices.
 //
 // The user may define named offices (Settings ▸ Office 3D) and assign each
-// profile to one. Every office becomes its own work room; profiles with no (or
-// a stale) assignment share an "Unassigned" room, which is only drawn when it
-// has someone in it. With NO offices configured the scene is the classic single
-// WORK room, byte-identical to before.
+// profile to one — by dragging its person onto a room, or with a picker. Every
+// office becomes its own work room; profiles with no (or a stale) assignment
+// have no desk and wait in the LOUNGE until they are dragged into an office.
+// With NO offices configured the scene is the classic single WORK room,
+// byte-identical to before.
 // ---------------------------------------------------------------------------
 // Aisles between office rooms. The row aisle is deeper because, in the
 // isometric view, desks of the room behind project up over the front of the
@@ -686,6 +687,8 @@ const OFFICE_MIN_DESKS = 2      // every room is at least two desks wide, even e
 const MAX_OFFICES = 24
 const MAX_OFFICE_NAME = 40
 const UNASSIGNED_OFFICE = 'Unassigned'
+const LOUNGE_LABEL = 'Lounge'
+const RESERVED_OFFICES = new Set([UNASSIGNED_OFFICE.toLowerCase(), LOUNGE_LABEL.toLowerCase()])
 
 // Unique, trimmed, non-empty names, in order. Accepts an array or a
 // newline/comma separated string (a hand-edited stored value).
@@ -701,7 +704,7 @@ function normalizeOffices(value) {
     if (typeof item !== 'string') continue
     const name = item.trim().slice(0, MAX_OFFICE_NAME)
     const key = name.toLowerCase()
-    if (!name || seen.has(key) || key === UNASSIGNED_OFFICE.toLowerCase()) continue
+    if (!name || seen.has(key) || RESERVED_OFFICES.has(key)) continue
     seen.add(key)
     out.push(name)
     if (out.length >= MAX_OFFICES) break
@@ -710,7 +713,8 @@ function normalizeOffices(value) {
 }
 
 // Group entry INDEXES by office. Returns null when no offices are configured,
-// which selects the legacy single-room layout.
+// which selects the legacy single-room layout. Unassigned profiles come last as
+// a `lounge` group: they get no desk and are drawn in the lounge instead.
 function officeGroups(entries, offices, assignments) {
   const names = normalizeOffices(offices)
   if (!names.length) return null
@@ -725,7 +729,7 @@ function officeGroups(entries, offices, assignments) {
   })
   const groups = names.map((name) => ({ name, members: byName.get(name) }))
   if (unassigned.length) {
-    groups.push({ name: UNASSIGNED_OFFICE, members: unassigned, unassigned: true })
+    groups.push({ name: UNASSIGNED_OFFICE, members: unassigned, lounge: true })
   }
   return groups
 }
@@ -736,7 +740,9 @@ function officeGroups(entries, offices, assignments) {
 // Either way the result carries `zones` (one floor per room) and `slots` (the
 // desk position of every entry index), which is what drawing and hit testing use.
 function sceneLayout(count, groups) {
-  if (Array.isArray(groups) && groups.length) return multiOfficeLayout(count, groups)
+  if (Array.isArray(groups) && groups.some((g) => g && !g.lounge)) {
+    return multiOfficeLayout(count, groups)
+  }
   const { cols, rows } = deskGrid(count)
   const workW = (cols - 1) * DESK_COL_SPACING + WORK_PAD
   const workH = (rows - 1) * DESK_ROW_SPACING + WORK_PAD
@@ -758,7 +764,10 @@ function sceneLayout(count, groups) {
 // Pack office rooms into rows (≈ square overall), each room sized for its own
 // desk grid; rooms in one row share the row's depth so the floor reads tidy.
 function multiOfficeLayout(count, groups) {
-  const blocks = groups.map((g) => {
+  // Lounge members (unassigned) get no room and no desk.
+  const loungeMembers = []
+  for (const g of groups) if (g && g.lounge && Array.isArray(g.members)) loungeMembers.push(...g.members)
+  const blocks = groups.filter((g) => g && !g.lounge).map((g) => {
     const members = Array.isArray(g.members) ? g.members : []
     const { cols, rows } = deskGrid(Math.max(OFFICE_MIN_DESKS, members.length))
     return {
@@ -773,7 +782,7 @@ function multiOfficeLayout(count, groups) {
   })
   const perRow = Math.max(1, Math.ceil(Math.sqrt(blocks.length)))
   const zones = []
-  const slots = new Array(Math.max(0, Math.floor(count) || 0))
+  const slots = new Array(Math.max(0, Math.floor(count) || 0)).fill(null)
   let y = 0
   let maxRowW = 0
   for (let r = 0; r < blocks.length; r += perRow) {
@@ -794,8 +803,6 @@ function multiOfficeLayout(count, groups) {
     y += rowH + OFFICE_GAP_Y
   }
   const workH = Math.max(0, y - OFFICE_GAP_Y)
-  // Any index a group did not cover (should not happen) still gets a desk spot.
-  for (let i = 0; i < slots.length; i++) if (!slots[i]) slots[i] = deskSlot(i, MAX_COLS)
   return finishLayout({
     cols: MAX_COLS,
     rows: 0,
@@ -804,6 +811,7 @@ function multiOfficeLayout(count, groups) {
     worldW: Math.max(LOUNGE_W, maxRowW),
     zones,
     slots,
+    loungeMembers,
     multi: true,
   })
 }
@@ -828,11 +836,85 @@ function finishLayout(L) {
   }
 }
 
-// Desk position of entry `index` in a computed layout.
+// Desk position of entry `index` in a computed layout; null for a profile that
+// has no desk (an unassigned profile waiting in the lounge).
 function layoutSlot(L, index) {
-  return L && Array.isArray(L.slots) && L.slots[index]
-    ? L.slots[index]
-    : deskSlot(index, L ? L.cols : MAX_COLS)
+  if (L && Array.isArray(L.slots)) {
+    if (L.slots[index]) return L.slots[index]
+    if (L.multi) return null
+  }
+  return deskSlot(index, L ? L.cols : MAX_COLS)
+}
+
+// Which profiles sit in the lounge: online-but-idle ones always, plus — with
+// offices — every unassigned one (any state), since they have no desk yet.
+function loungeIndexes(entries, L) {
+  const extra = new Set(L && Array.isArray(L.loungeMembers) ? L.loungeMembers : [])
+  const out = []
+  ;(Array.isArray(entries) ? entries : []).forEach((entry, i) => {
+    if (extra.has(i) || (entry && entry.online && !entry.busy)) out.push(i)
+  })
+  return out
+}
+
+// Seats for everyone in the lounge. Idle profiles take the tea ring around the
+// table (loungeSlot). With offices, unassigned profiles — the ones waiting to
+// be dragged into an office — line up in rows along the lounge instead, spread
+// out and clear of the furniture so each one is easy to grab.
+// 2.6 world units keeps neighbouring name chips apart on screen (they step
+// down-right by 1.3 units each, more than a chip's height).
+const WAIT_SPACING = 2.6
+function waitingSpots(L) {
+  const spots = []
+  const fx0 = L.lounge.x - 0.9          // furniture group x-extent (+ margin)
+  const fx1 = L.lounge.x + 4.4
+  // Front row first: it is farthest from the office rooms behind the lounge.
+  for (const y of [L.loungeY0 + LOUNGE_DEPTH - 0.8, L.loungeY0 + 0.9]) {
+    for (let x = 1.0; x <= L.worldW - 0.8; x += WAIT_SPACING) {
+      if (x > fx0 && x < fx1) continue
+      spots.push({ x, y })
+    }
+  }
+  return spots
+}
+
+function loungeSeatsFor(entries, L) {
+  const waiting = new Set(L && Array.isArray(L.loungeMembers) ? L.loungeMembers : [])
+  const all = loungeIndexes(entries, L)
+  const ring = all.filter((i) => !waiting.has(i))
+  const queue = all.filter((i) => waiting.has(i))
+  const spots = queue.length ? waitingSpots(L) : []
+  const seats = ring.map((i, idx) => ({ i, idx, slot: loungeSlot(idx, ring.length, L.lounge) }))
+  queue.forEach((i, k) => {
+    // More waiting than spots (huge installs): overflow back onto the ring.
+    const slot = spots[k] || loungeSlot(ring.length + k, all.length, L.lounge)
+    seats.push({ i, idx: ring.length + k, slot, waiting: true })
+  })
+  return seats
+}
+
+// ---------------------------------------------------------------------------
+// Screen -> world, and drop targets for drag-to-assign.
+// ---------------------------------------------------------------------------
+function screenToWorld(frame, px, py) {
+  const a = (px - frame.ox) / (frame.scale * ISO_X) // x - y
+  const b = (py - frame.oy) / (frame.scale * ISO_Y) // x + y   (z = 0)
+  return { x: (a + b) / 2, y: (b - a) / 2 }
+}
+
+// The room under a world point: { office: name } for an office room,
+// { office: '' } for the lounge (= unassign), or null for empty floor.
+function dropTargetAt(L, x, y) {
+  if (!L || !L.multi) return null
+  for (const z of L.zones) {
+    if (x >= z.x0 && x <= z.x0 + z.w && y >= z.y0 && y <= z.y0 + z.h) {
+      return { office: z.name, zone: z }
+    }
+  }
+  if (x >= 0 && x <= L.worldW && y >= L.loungeY0 && y <= L.loungeY0 + LOUNGE_DEPTH) {
+    return { office: '', zone: { name: LOUNGE_LABEL, x0: 0, y0: L.loungeY0, w: L.worldW, h: LOUNGE_DEPTH } }
+  }
+  return null
 }
 
 function deskSlot(index, cols) {
@@ -845,9 +927,14 @@ function deskSlot(index, cols) {
 }
 
 function loungeSlot(index, total, lounge) {
-  const t = total > 0 ? total : 1
-  const angle = (index / t) * Math.PI * 2
-  const r = 1.7
+  // Up to 8 people share the inner ring around the table (unchanged look);
+  // a bigger crowd spills onto a wider outer ring.
+  const INNER = 8
+  const outer = total > INNER && index >= INNER
+  const t = outer ? total - INNER : total > 0 ? Math.min(total, INNER) : 1
+  const k = outer ? index - INNER : index
+  const angle = (k / t) * Math.PI * 2 + (outer ? Math.PI / t : 0)
+  const r = outer ? 2.75 : 1.7
   return {
     x: lounge.x + 2.0 + Math.cos(angle) * r,
     y: lounge.y + 1.6 + Math.sin(angle) * r,
@@ -895,6 +982,7 @@ function hitTestDesks(entries, frame, px, py) {
   let bestDepth = -Infinity
   for (let i = 0; i < entries.length; i++) {
     const slot = layoutSlot(layout, i)
+    if (!slot) continue
     const box = deskHitBox(slot, ox, oy, scale)
     if (px < box.x0 || px > box.x1 || py < box.y0 || py > box.y1) continue
     const depth = slot.x + slot.y
@@ -904,6 +992,40 @@ function hitTestDesks(entries, frame, px, py) {
     }
   }
   return bestIndex
+}
+
+// A lounge sitter's clickable/draggable volume: stool + body around its slot.
+function loungeHitBox(slot, ox, oy, scale) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+  for (const dx of [-0.45, 0.45]) {
+    for (const dy of [-0.45, 0.45]) {
+      for (const dz of [0, 1.7]) {
+        const [px, py] = iso(slot.x + dx, slot.y + dy, dz, scale)
+        x0 = Math.min(x0, ox + px); x1 = Math.max(x1, ox + px)
+        y0 = Math.min(y0, oy + py); y1 = Math.max(y1, oy + py)
+      }
+    }
+  }
+  return { x0, y0, x1, y1 }
+}
+
+// Desk OR lounge sitter under (px, py): the profile index, or -1. Lounge
+// sitters are drawn on top of the desks, so they win a tie. Sitters stand
+// close together and their boxes overlap, so among the hits the one whose body
+// centre is nearest the pointer is the one being grabbed.
+function hitTestAgents(entries, frame, px, py) {
+  if (!frame || !Array.isArray(entries)) return -1
+  const lounge = Array.isArray(frame.loungeSeats) ? frame.loungeSeats : []
+  let best = -1
+  let bestDist = Infinity
+  for (const { i, slot } of lounge) {
+    const box = loungeHitBox(slot, frame.ox, frame.oy, frame.scale)
+    if (px < box.x0 || px > box.x1 || py < box.y0 || py > box.y1) continue
+    const [cx, cy] = iso(slot.x, slot.y, 0.9, frame.scale)
+    const dist = Math.hypot(px - (frame.ox + cx), py - (frame.oy + cy))
+    if (dist < bestDist) { bestDist = dist; best = i }
+  }
+  return best >= 0 ? best : hitTestDesks(entries, frame, px, py)
 }
 
 // ---------------------------------------------------------------------------
@@ -1072,7 +1194,78 @@ function drawOfficeLabel(c, ox, oy, scale, zone, P) {
   c.restore()
 }
 
-function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
+// Everything a frame needs to place people — layout, transform, lounge seats —
+// as a pure function, so pointer handlers can recompute it for the CURRENT
+// entries/offices instead of trusting the last painted frame (which can be a
+// frame or more behind, or paused while the window is hidden).
+function computeFrame(cssW, cssH, entries, groups, view) {
+  const list = Array.isArray(entries) ? entries : []
+  const L = sceneLayout(list.length, groups)
+  const T = frameTransform(
+    cssW, cssH, L,
+    view ? view.zoom : 1,
+    view ? view.panX : 0,
+    view ? view.panY : 0,
+  )
+  return { ox: T.ox, oy: T.oy, scale: T.scale, zoom: T.zoom, layout: L, loungeSeats: loungeSeatsFor(list, L) }
+}
+
+// Accent wash over the room a dragged agent would land in.
+function drawDropHighlight(c, ox, oy, scale, zone, accent) {
+  const pts = [[zone.x0, zone.y0], [zone.x0 + zone.w, zone.y0], [zone.x0 + zone.w, zone.y0 + zone.h], [zone.x0, zone.y0 + zone.h]]
+  c.save()
+  c.beginPath()
+  pts.forEach(([x, y], k) => {
+    const [px, py] = iso(x, y, 0.01, scale)
+    if (k === 0) c.moveTo(ox + px, oy + py)
+    else c.lineTo(ox + px, oy + py)
+  })
+  c.closePath()
+  c.globalAlpha = 0.14
+  c.fillStyle = accent
+  c.fill()
+  c.globalAlpha = 0.95
+  c.strokeStyle = accent
+  c.lineWidth = 2.5
+  c.setLineDash([7, 5])
+  c.stroke()
+  c.restore()
+}
+
+// The agent being dragged: a coloured name chip under the cursor, plus where it
+// will go ("→ Comercial", "→ Lounge").
+function drawDragGhost(c, drag, entry, P) {
+  const name = entry && entry.profile ? entry.profile : '?'
+  const where = drag.target ? ' → ' + (drag.target.office || LOUNGE_LABEL) : ''
+  const text = name + where
+  c.save()
+  c.font = '600 12px system-ui, -apple-system, "Segoe UI", sans-serif'
+  c.textBaseline = 'middle'
+  const w = c.measureText(text).width + 30
+  const h = 24
+  const x = drag.px + 12
+  const y = drag.py - h - 6
+  c.shadowColor = 'rgba(0,0,0,0.35)'
+  c.shadowBlur = 8
+  c.beginPath()
+  if (typeof c.roundRect === 'function') c.roundRect(x, y, w, h, 12)
+  else c.rect(x, y, w, h)
+  c.fillStyle = P.pillColor
+  c.fill()
+  c.shadowBlur = 0
+  c.strokeStyle = drag.target ? P.accent : (P.pillBorder || P.stroke)
+  c.lineWidth = 1.5
+  c.stroke()
+  c.beginPath()
+  c.arc(x + 13, y + h / 2, 5, 0, Math.PI * 2)
+  c.fillStyle = profileColor(name) || P.accent
+  c.fill()
+  c.fillStyle = P.textSec
+  c.fillText(text, x + 23, y + h / 2 + 0.5)
+  c.restore()
+}
+
+function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups, drag) {
   if (!Array.isArray(entries)) entries = []
   const P = buildPalette(canvas)
   const bg = P.bg
@@ -1097,15 +1290,9 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
   // Size the scene for THIS many desks, then fit it (and apply the user's zoom +
   // pan) into the canvas. frameTransform is pure so the wheel handler computes
   // the identical transform.
-  const L = sceneLayout(Array.isArray(entries) ? entries.length : 0, groups)
-  const T = frameTransform(
-    cssW,
-    cssH,
-    L,
-    view ? view.zoom : 1,
-    view ? view.panX : 0,
-    view ? view.panY : 0,
-  )
+  const F = computeFrame(cssW, cssH, entries, groups, view)
+  const L = F.layout
+  const T = F
   const ox = T.ox
   const oy = T.oy
   const scale = T.scale
@@ -1141,16 +1328,24 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
   if (
     typeof selectedIndex === 'number' &&
     selectedIndex >= 0 &&
-    selectedIndex < entries.length
+    selectedIndex < entries.length &&
+    layoutSlot(L, selectedIndex)
   ) {
     drawSelection(c, ox, oy, scale, layoutSlot(L, selectedIndex), accent)
+  }
+
+  // Drop target under a dragged agent.
+  if (drag && drag.target && drag.target.zone) {
+    drawDropHighlight(c, ox, oy, scale, drag.target.zone, accent)
   }
 
   // Lounge furniture (drawn behind lounge avatars because sofa is at higher y).
   drawLounge(c, ox, oy, scale, stroke, textQuat, accent, tSec, P, L.lounge)
 
   // Desks & at-desk avatars — painter's order, back to front.
-  const desks = entries.map((entry, i) => ({ entry, i, slot: layoutSlot(L, i) }))
+  const desks = entries
+    .map((entry, i) => ({ entry, i, slot: layoutSlot(L, i) }))
+    .filter((d) => d.slot) // unassigned profiles have no desk (they wait in the lounge)
   desks.sort((a, b) => (a.slot.x + a.slot.y) - (b.slot.x + b.slot.y))
   for (const { entry, i, slot } of desks) {
     drawDeskAndAvatar(c, ox, oy, scale, slot, entry, i, tSec,
@@ -1160,19 +1355,27 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
   // Lounge avatars — only ONLINE-but-idle profiles relax here.
   // Offline profiles are NOT drawn in the lounge (they simply haven't shown
   // up); their desk sits empty with a dark screen instead.
-  const lounged = entries
-    .map((entry, i) => ({ entry, i }))
-    .filter(({ entry }) => entry.online && !entry.busy)
-  lounged.forEach(({ entry, i }, idx) => {
-    const slot = loungeSlot(idx, lounged.length, L.lounge)
-    drawLoungeAvatar(c, ox, oy, scale, slot, entry, i, tSec, idx,
-      { stroke, textSec, textTer, accent, P })
-  })
+  // With offices, unassigned profiles (no desk) wait here too, whatever their
+  // state — offline ones are drawn faded by drawLoungeAvatar.
+  const loungeSeats = F.loungeSeats
+  // Back-to-front with offices (the lounge can get crowded); legacy keeps its
+  // original paint order.
+  const loungeOrder = L.multi
+    ? loungeSeats.slice().sort((a, b) => (a.slot.x + a.slot.y) - (b.slot.x + b.slot.y))
+    : loungeSeats
+  loungeOrder
+    .forEach(({ i, idx, slot }) => {
+      if (drag && drag.moved && drag.index === i) return // lifted by the cursor
+      drawLoungeAvatar(c, ox, oy, scale, slot, entries[i], i, tSec, idx,
+        { stroke, textSec, textTer, accent, P })
+    })
 
   // Office name plates, on top of everything in their room.
   if (L.multi) {
     for (const z of L.zones) drawOfficeLabel(c, ox, oy, scale, z, P)
   }
+
+  if (drag && drag.moved) drawDragGhost(c, drag, entries[drag.index], P)
 
   // -------------------------------------------------------------------------
   // (Aggregate stats now render as DOM chips below the canvas — see
@@ -1181,7 +1384,7 @@ function drawFrame(canvas, c, entries, tSec, selectedIndex, view, groups) {
 
   // Hand the transform back so a click can be hit-tested against exactly the
   // projection these pixels were drawn with (zoom + pan included).
-  return { ox, oy, scale, zoom: T.zoom, layout: L }
+  return { ox, oy, scale, zoom: T.zoom, layout: L, loungeSeats }
 }
 
 // Draws a slim status strip at the very bottom of the canvas showing
@@ -1935,13 +2138,16 @@ function drawLoungeAvatar(c, ox, oy, scale, slot, entry, index, tSec, idx, palet
 // ---------------------------------------------------------------------------
 // React components.
 // ---------------------------------------------------------------------------
-function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
+function OfficeCanvas({ entries, selectedIndex, onPick, groups, onAssign }) {
   const containerRef = useRef(null)
   const canvasRef = useRef(null)
   const rafRef = useRef(0)
   const startRef = useRef(0)
   const entriesRef = useRef(entries)
   const groupsRef = useRef(groups || null)
+  const onAssignRef = useRef(onAssign)
+  // Agent being dragged onto a room: { index, px, py, target, moved }.
+  const agentDragRef = useRef(null)
   // Transform of the last drawn frame, so a click can be hit-tested against the
   // exact projection the pixels came from.
   const frameRef = useRef(null)
@@ -1967,6 +2173,10 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
   useEffect(() => {
     groupsRef.current = groups || null
   }, [groups])
+
+  useEffect(() => {
+    onAssignRef.current = onAssign
+  }, [onAssign])
 
   useEffect(() => {
     selectedRef.current = selectedIndex
@@ -2007,7 +2217,7 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
         try {
           frameRef.current = drawFrame(
             canvas, c2, entriesRef.current || [], tSec, selectedRef.current,
-            viewRef.current, groupsRef.current,
+            viewRef.current, groupsRef.current, agentDragRef.current,
           )
         } catch (err) {
           // Never let a draw error kill the loop.
@@ -2048,6 +2258,12 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
     }
   }
 
+  // The frame for the current props/view, computed now (see computeFrame).
+  const liveFrame = () => {
+    const vp = viewport()
+    return computeFrame(vp.cssW, vp.cssH, entriesRef.current || [], groupsRef.current, viewRef.current)
+  }
+
   // Zoom keeping the point under (ax, ay) — the cursor for wheel, the canvas
   // centre for the buttons — pinned to its screen position.
   const applyZoom = (nextZoom, ax, ay) => {
@@ -2078,11 +2294,23 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
     // Captured helpers read live DOM/entriesRef/viewRef, not render-time state.
   }, [])
 
-  // Drag to pan. A press that never moves is still a click, so the desk pick
-  // keeps working; once the pointer travels past a few px it becomes a pan and
-  // the click that follows the release is swallowed.
+  // Drag to pan — or, with offices, drag a PERSON (desk or lounge sitter) onto
+  // a room to assign it there (the lounge = unassign). A press that never moves
+  // is still a click, so picking keeps working; once the pointer travels past a
+  // few px it becomes a drag and the click that follows the release is swallowed.
+  const localPoint = (event) => {
+    const rect = event.currentTarget.getBoundingClientRect()
+    return [event.clientX - rect.left, event.clientY - rect.top]
+  }
+
   const handlePointerDown = (event) => {
     if (event.button !== 0) return
+    const frame = liveFrame()
+    let agent = -1
+    if (onAssignRef.current && frame && frame.layout && frame.layout.multi) {
+      const [px, py] = localPoint(event)
+      agent = hitTestAgents(entriesRef.current || [], frame, px, py)
+    }
     dragRef.current = {
       id: event.pointerId,
       x: event.clientX,
@@ -2090,6 +2318,7 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
       panX: viewRef.current.panX,
       panY: viewRef.current.panY,
       moved: false,
+      agent,
     }
   }
 
@@ -2108,6 +2337,19 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
         // Capture is a nicety; the drag works without it.
       }
     }
+    if (d.agent >= 0) {
+      const frame = liveFrame()
+      const [px, py] = localPoint(event)
+      const w = frame ? screenToWorld(frame, px, py) : null
+      agentDragRef.current = {
+        index: d.agent,
+        px,
+        py,
+        moved: true,
+        target: w ? dropTargetAt(frame.layout, w.x, w.y) : null,
+      }
+      return
+    }
     setView({ zoom: viewRef.current.zoom, panX: d.panX + dx, panY: d.panY + dy })
   }
 
@@ -2115,9 +2357,16 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
     const d = dragRef.current
     if (!d) return
     dragRef.current = null
+    const agentDrag = agentDragRef.current
+    agentDragRef.current = null
     if (!d.moved) return
     suppressClickRef.current = true
     setDragging(false)
+    if (agentDrag && agentDrag.target && event.type !== 'pointercancel') {
+      const entry = (entriesRef.current || [])[agentDrag.index]
+      const assign = onAssignRef.current
+      if (entry && entry.profile && assign) assign(entry.profile, agentDrag.target.office)
+    }
     try {
       event.currentTarget.releasePointerCapture(d.id)
     } catch (err) {
@@ -2135,11 +2384,11 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
     }
     const pick = onPickRef.current
     if (!pick) return
-    const frame = frameRef.current
+    const frame = liveFrame()
     const list = entriesRef.current || []
     if (!frame) return
     const rect = event.currentTarget.getBoundingClientRect()
-    const index = hitTestDesks(
+    const index = hitTestAgents(
       list, frame, event.clientX - rect.left, event.clientY - rect.top,
     )
     pick(index >= 0 ? list[index] : null)
@@ -2164,7 +2413,8 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
         onPointerCancel: endDrag,
         onDoubleClick: resetView,
         style: { touchAction: 'none' },
-        title: 'Click a desk to inspect · ⌘/Ctrl + scroll to zoom · drag to pan · double-click to fit',
+        title: (groups ? 'Drag a person onto an office to assign it (onto the lounge to unassign) · ' : '') +
+          'Click a desk to inspect · ⌘/Ctrl + scroll to zoom · drag to pan · double-click to fit',
         className: cn(
           'block w-full h-full rounded-md border border-[var(--ui-stroke-secondary)]',
           onPick ? (dragging ? 'cursor-grabbing' : 'cursor-grab') : '',
@@ -2204,7 +2454,8 @@ function OfficeCanvas({ entries, selectedIndex, onPick, groups }) {
             className:
               'absolute left-2 bottom-2 pointer-events-none text-[10px] ' +
               'text-[var(--ui-text-tertiary)]',
-            children: '\u2318/Ctrl + scroll to zoom \u00b7 drag to pan',
+            children: (groups ? 'Drag a person onto an office to assign it \u00b7 ' : '') +
+              '\u2318/Ctrl + scroll to zoom \u00b7 drag to pan',
           })
         : null,
     ],
@@ -2290,7 +2541,7 @@ function OfficePicker({ profile, offices, assignments, update, className }) {
       className,
     ),
     children: [
-      jsx('option', { value: '', children: '— ' + UNASSIGNED_OFFICE + ' —' }, ''),
+      jsx('option', { value: '', children: '— ' + LOUNGE_LABEL + ' (unassigned) —' }, ''),
       ...offices.map((name) => jsx('option', { value: name, children: name }, name)),
     ],
   })
@@ -2313,7 +2564,7 @@ function OfficesEditor({ offices, update }) {
       jsx('p', {
         className: 'text-xs text-[var(--ui-text-tertiary)]',
         children:
-          'One office per line. Each office is drawn as its own room; assign profiles below or from a desk\u2019s detail panel. Leave empty for the classic single WORK room.',
+          'One office per line. Each office is drawn as its own room. Unassigned profiles wait in the lounge: drag a person onto an office in the Office page (or use the pickers below) to assign it; drag it back to the lounge to unassign. Leave empty for the classic single WORK room.',
       }),
       jsx('textarea', {
         value: draft,
@@ -2822,6 +3073,11 @@ function OfficePage({ ctx, prefs, update }) {
   // Selecting a desk or a leaderboard row. Held by profile NAME, not index, so
   // it survives a re-sort or a filtered-out row.
   const pick = (entry) => setSelectedProfile(entry && entry.profile ? entry.profile : null)
+  // Drag-to-assign from the canvas. Reads the live prefs so two quick drops
+  // never overwrite each other with a stale assignments map.
+  const assign = update
+    ? (profile, office) => update(assignmentPatch(prefs.get().assignments, profile, office))
+    : undefined
 
   let body
   if (query.isLoading) {
@@ -2857,7 +3113,7 @@ function OfficePage({ ctx, prefs, update }) {
             jsx('div', {
               className: 'min-w-0',
               style: empty ? undefined : { height: 'clamp(380px, 62vh, 760px)' },
-              children: empty || jsx(OfficeCanvas, { entries, selectedIndex, onPick: pick, groups }),
+              children: empty || jsx(OfficeCanvas, { entries, selectedIndex, onPick: pick, groups, onAssign: assign }),
             }),
             jsxs('aside', {
               'aria-label': 'Profile usage and details',
