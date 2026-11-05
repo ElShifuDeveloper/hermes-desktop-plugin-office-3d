@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-11-05
+
+### Added
+- **Multiple offices.** Define any number of named offices in **Settings ▸ Plugins ▸
+  Office 3D ▸ Offices** (one per line; default preset: MokLabs-TI, Comercial, Operaciones,
+  Personas, Finanzas, Riesgos, Travel). Each office is drawn as its own room with a name
+  plate and head count; empty offices still get a room. Assign a profile to an office from
+  the **Profile offices** list in Settings or from the **Office** picker in a desk's detail
+  panel. Profiles without a (valid) assignment share an **Unassigned** room, drawn only when
+  it has someone in it. The lounge stays shared. An empty office list restores the classic
+  single WORK room exactly. Offices and assignments persist with `ctx.storage`.
+- `tests/multi-office-layout.mjs` — dependency-free checks for the office layout (rooms never
+  overlap, every desk sits inside its own room, clicks hit the right desk, legacy unchanged).
+
 ## [1.4.1] - 2026-11-05
 
 ### Fixed
